@@ -21,10 +21,8 @@ import base64
 import binascii
 import hashlib
 import hmac
-import string
-import sys
 import time
-import xml.etree.ElementTree as etree
+
 # Python 2/3 compatibility
 try:
     import urllib.parse as urllib
@@ -33,13 +31,12 @@ except ImportError:
 
 import requests
 from Crypto.Cipher import AES
-from Crypto.Random import random
 import xml.etree.ElementTree as etree
 from oath import totp, hotp
 from vipaccess.version import __version__
 
 PROVISIONING_URL = 'https://services.vip.symantec.com/prov'
-VIP_ACCESS_LOGO = 'https://raw.githubusercontent.com/dlenski/python-vipaccess/master/vipaccess.png'
+VIP_ACCESS_LOGO = 'https://raw.githubusercontent.com/crystailx/python-vipaccess/master/vipaccess.png'
 
 TEST_URL = 'https://vip.symantec.com/otpCheck'
 SYNC_URL = 'https://vip.symantec.com/otpSync'
@@ -71,14 +68,14 @@ REQUEST_TEMPLATE = '''<?xml version="1.0" encoding="UTF-8" ?>
 def generate_request(**request_parameters):
     '''Generate a token provisioning request.'''
     default_request_parameters = {
-        'timestamp':int(time.time()),
-        'token_model':'SYMC',
-        'otp_algorithm':'HMAC-SHA1-TRUNC-6DIGITS',
-        'shared_secret_delivery_method':'HTTPS',
-        'app_handle':'iMac010200',
-        'client_id_type':'BOARDID',
-        'client_id':'python-vipaccess-' + __version__,
-        'dist_channel':'Symantec',
+        'timestamp': int(time.time()),
+        'token_model': 'SYMC',
+        'otp_algorithm': 'HMAC-SHA1-TRUNC-6DIGITS',
+        'shared_secret_delivery_method': 'HTTPS',
+        'app_handle': 'iMac010200',
+        'client_id_type': 'BOARDID',
+        'client_id': '0000-0000' + __version__,
+        'dist_channel': 'Symantec',
     }
 
     default_request_parameters.update(request_parameters)
@@ -90,20 +87,22 @@ def generate_request(**request_parameters):
             HMAC_KEY,
             data_before_hmac.encode('utf-8'),
             hashlib.sha256
-            ).digest()
-        ).decode('utf-8')
+        ).digest()
+    ).decode('utf-8')
 
     return REQUEST_TEMPLATE % request_parameters
 
+
 def get_provisioning_response(request, session=requests):
     return session.post(PROVISIONING_URL, data=request)
+
 
 def get_token_from_response(response_xml):
     '''Retrieve relevant token details from Symantec's provisioning
     response.'''
     # Define an arbitrary namespace "v" because etree doesn't like it
     # when it's "None"
-    ns = {'v':'http://www.verisign.com/2006/08/vipservice'}
+    ns = {'v': 'http://www.verisign.com/2006/08/vipservice'}
 
     tree = etree.fromstring(response_xml)
     result = tree.find('v:Status/v:StatusMessage', ns).text
@@ -130,23 +129,26 @@ def get_token_from_response(response_xml):
         token['cipher'] = base64.b64decode(data.find('v:Cipher', ns).text)
         token['digest'] = base64.b64decode(data.find('v:Digest', ns).text)
         token['expiry'] = expiry.text
-        ts = usage.find('v:TimeStep', ns) # TOTP only
+        ts = usage.find('v:TimeStep', ns)  # TOTP only
         token['period'] = int(ts.text) if ts is not None else None
-        ct = usage.find('v:Counter', ns) # HOTP only
+        ct = usage.find('v:Counter', ns)  # HOTP only
         token['counter'] = int(ct.text) if ct is not None else None
 
         # Apparently, secret.attrib['type'] == 'HOTP' in all cases, so the presence or absence of
         # the counter or period fields is the only sane way to distinguish TOTP from HOTP tokens.
-        assert (token['counter'] is not None and token['period'] is None) or (token['period'] is not None and token['counter'] is None)
+        assert (token['counter'] is not None and token['period'] is None) or (
+                    token['period'] is not None and token['counter'] is None)
 
         algorithm = usage.find('v:AI', ns).attrib['type'].split('-')
-        if len(algorithm)==4 and algorithm[0]=='HMAC' and algorithm[2]=='TRUNC' and algorithm[3].endswith('DIGITS'):
+        if len(algorithm) == 4 and algorithm[0] == 'HMAC' and algorithm[2] == 'TRUNC' and algorithm[3].endswith(
+                'DIGITS'):
             token['algorithm'] = algorithm[1].lower()
             token['digits'] = int(algorithm[3][:-6])
         else:
             raise RuntimeError('unknown algorithm %r' % '-'.join(algorithm))
 
         return token
+
 
 def decrypt_key(token_iv, token_cipher):
     '''Decrypt the OTP key using the hardcoded AES key.'''
@@ -162,6 +164,7 @@ def decrypt_key(token_iv, token_cipher):
 
     return otp_key
 
+
 def generate_otp_uri(token, secret, issuer='VIP Access', image=VIP_ACCESS_LOGO):
     '''Generate the OTP URI.'''
     token_parameters = {}
@@ -175,35 +178,34 @@ def generate_otp_uri(token, secret, issuer='VIP Access', image=VIP_ACCESS_LOGO):
         # Per #53, Authy does not correctly parse the latter.
         # Therefore, we include only the former (issuer in the URI path) for maximum compatibility.
         # issuer=issuer,
+        digits=token.get('digits', 6),
+        algorithm=token.get('algorithm', 'SHA1').upper(),
+        period=token.get('period', 30),
+        image=urllib.quote_plus(image)
     )
-    if image:
-        data['image'] = image
-    if token.get('digits', 6) != 6:  # 6 digits is the default
-        data['digits'] = token['digits']
-    if token.get('algorithm', 'SHA1').upper() != 'SHA1':  # SHA1 is the default
-        algorithm=token['algorithm'].upper(),
-    if token.get('counter') is not None: # HOTP
+    if token.get('counter') is not None:  # HOTP
         data['counter'] = token['counter']
-        token_parameters['otp_type'] = 'hotp'
-    elif token.get('period'): # TOTP
-        if token['period'] != 30:  # 30 seconds is the default
-            data['period'] = token['period']
-        token_parameters['otp_type'] = 'totp'
-    else: # Assume TOTP with default period 30 (FIXME)
+        token_parameters['otp_type'] = urllib.quote('hotp')
+    elif token.get('period'):  # TOTP
+        data['period'] = token['period']
+        token_parameters['otp_type'] = urllib.quote('totp')
+    else:  # Assume TOTP with default period 30 (FIXME)
+        data['period'] = 30
         token_parameters['otp_type'] = 'totp'
     token_parameters['parameters'] = urllib.urlencode(data, safe=':/')
     return 'otpauth://%(otp_type)s/%(issuer)s:%(account_name)s?%(parameters)s' % token_parameters
 
+
 def check_token(token, secret, session=requests, timestamp=None):
     '''Check the validity of the generated token.'''
     secret_hex = binascii.b2a_hex(secret).decode('ascii')
-    if token.get('counter') is not None: # HOTP
+    if token.get('counter') is not None:  # HOTP
         otp = hotp(secret_hex, counter=token['counter'])
-    elif token.get('period'): # TOTP
+    elif token.get('period'):  # TOTP
         otp = totp(secret_hex, period=token['period'], t=timestamp)
-    else: # Assume TOTP with default period 30 (FIXME)
+    else:  # Assume TOTP with default period 30 (FIXME)
         otp = totp(secret_hex, t=timestamp)
-    data = {'cr%s'%d:c for d,c in enumerate(otp, 1)}
+    data = {'cr%s' % d: c for d, c in enumerate(otp, 1)}
     data['cred'] = token['id']
     data['continue'] = 'otp_check'
     token_check = session.post(TEST_URL, data=data)
@@ -216,24 +218,25 @@ def check_token(token, secret, session=requests, timestamp=None):
     else:
         return None
 
+
 def sync_token(token, secret, session=requests, timestamp=None):
     '''Sync the generated token. This will fail for a TOTP token if performed less than 2 periods after the last sync or check.'''
     secret_hex = binascii.b2a_hex(secret).decode('ascii')
     if timestamp is None:
         timestamp = int(time.time())
-    if token.get('counter') is not None: # HOTP
+    if token.get('counter') is not None:  # HOTP
         # This reliably fails with -1, 0
         otp1 = hotp(secret_hex, counter=token['counter'])
-        otp2 = hotp(secret_hex, counter=token['counter']+1)
-    elif token.get('period'): # TOTP
-        otp1 = totp(secret_hex, period=token['period'], t=timestamp-token['period'])
+        otp2 = hotp(secret_hex, counter=token['counter'] + 1)
+    elif token.get('period'):  # TOTP
+        otp1 = totp(secret_hex, period=token['period'], t=timestamp - token['period'])
         otp2 = totp(secret_hex, period=token['period'], t=timestamp)
-    else: # Assume TOTP with default period 30 (FIXME)
-        otp1 = totp(secret_hex, t=timestamp-30)
+    else:  # Assume TOTP with default period 30 (FIXME)
+        otp1 = totp(secret_hex, t=timestamp - 30)
         otp2 = totp(secret_hex, t=timestamp)
 
-    data = {'cr%s'%d:c for d,c in enumerate(otp1, 1)}
-    data.update({'ncr%s'%d:c for d,c in enumerate(otp2, 1)})
+    data = {'cr%s' % d: c for d, c in enumerate(otp1, 1)}
+    data.update({'ncr%s' % d: c for d, c in enumerate(otp2, 1)})
     data['cred'] = token['id']
     data['continue'] = 'otp_sync'
     token_check = session.post(SYNC_URL, data=data)
